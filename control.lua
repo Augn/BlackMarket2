@@ -10,7 +10,6 @@ mod_gui = require("mod-gui")
 
 configure_settings()
 
-local table = require('__flib__.table')
 -- local gui = require('__flib__.gui') -- Currently unused
 
 local trader_type = { item = 1, fluid = 2, energy = 3, "item", "fluid", "energy" }
@@ -31,7 +30,7 @@ for name, proto in pairs(prototypes.quality) do
 	quality_lookup_by_name[proto.name] = proto
 end
 
-table.sort(quality_list, function(a, b) return a.level <= b.level end)
+table.sort(quality_list, function(a, b) return a.level < b.level end)
 
 local has_quality = #quality_list > 0
 
@@ -1246,21 +1245,16 @@ local function compute_recipe_purity(recipe_name, item_name)
 	local other_amount = 0   -- the other stuff that the recipe produces
 	local ingredient_amount = 0 -- the stuff we are actually trying to solve for
 
-	table.for_each(recipe.products, function(product)
+	for product_index, product in ipairs(recipe.products) do
+		local amount = recipe.prototype.get_product_amount(product_index)
+
 		-- here we categorize each of the recipes products into product or other
 		if product.name == item_name then
-			if product.amount ~= nil then
-				ingredient_amount = ingredient_amount + product.amount
-			elseif product.amount_min and product.amount_max and product.probability then
-				ingredient_amount = ingredient_amount +
-					(product.amount_min + product.amount_max) / 2 * product.probability
-			end
-		elseif product.amount ~= nil then -- if its an other we still need to check if its a probability or an amount
-			other_amount = other_amount + product.amount
-		elseif product.amount_min and product.amount_max and product.probability then
-			other_amount = other_amount + (product.amount_min + product.amount_max) / 2 * product.probability
+			ingredient_amount = ingredient_amount + amount
+		else
+			other_amount = other_amount + amount
 		end
-	end)
+	end
 
 	-- cant divide by 0
 	if other_amount == 0 then other_amount = 1 end
@@ -1334,13 +1328,9 @@ local function compute_item_cost(item_name, loops, recipes_used)
 
 	-- count the amount of product we are making in this recipe
 	local product_amount = 0
-	for _, product in pairs(recipe.products) do
+	for product_index, product in ipairs(recipe.products) do
 		if product.name == item_name then
-			if product.amount then
-				product_amount = product.amount
-			elseif product.amount_min and product.amount_max and product.probability then
-				product_amount = (product.amount_min + product.amount_max) / 2 * product.probability
-			end
+			product_amount = product_amount + recipe.prototype.get_product_amount(product_index)
 		end
 	end
 
@@ -1407,16 +1397,20 @@ local function update_objects_prices()
 
 					-- or recipes with catalysts
 					local hasCatalyst = false
-					table.for_each(recipe.products, function(recipe_product)
+					for _, recipe_product in pairs(recipe.products) do
 						-- if the recipe just straight up tells us
 						if recipe_product.catalyst_amount ~= nil and recipe_product.catalyst_amount > 0 then
 							hasCatalyst = true
 							-- otherwise check for name matches
 						else
-							table.for_each(recipe.ingredients,
-								function(ingr) if ingr.name == recipe_product.name then hasCatalyst = true end end)
+							for _, ingredient in pairs(recipe.ingredients) do
+								if ingredient.name == recipe_product.name then
+									hasCatalyst = true
+									break
+								end
+							end
 						end
-					end)
+					end
 
 					if new_purity > old_purity and isBarrel == false and hasCatalyst == false then
 						item_recipe.recipe =
@@ -1499,8 +1493,9 @@ end
 
 local function multiply_prices()
 	if not (settings.global["BM2-price_multiplyer"] == nil or settings.global["BM2-price_multiplyer"].value == 1) then -- no point of multiplying prices if its just by 1 or not configured at all
-		table.for_each(storage.prices,
-			function(price) price.current = price.current * settings.global["BM2-price_multiplyer"].value end)
+		for _, price in pairs(storage.prices) do
+			price.current = price.current * settings.global["BM2-price_multiplyer"].value
+		end
 	end
 end
 
@@ -1833,16 +1828,11 @@ local function evaluate_trader(trader)
 		end
 	elseif trader.type == trader_type.fluid then
 		local tank = trader.entity
-		if tank.fluidbox then
-			local box = tank.fluidbox[1]
-			if box ~= nil then
-				local name = box.name
-				local count = box.amount
-
-				local price = storage.prices[name]
-				if price ~= nil then
-					money = count * price.current
-				end
+		local fluid = tank.get_fluid(1)
+		if fluid ~= nil then
+			local price = storage.prices[fluid.name]
+			if price ~= nil then
+				money = fluid.amount * price.current
 			end
 		end
 	elseif trader.type == trader_type.energy then
@@ -1940,14 +1930,14 @@ local function sell_trader(trader, force_mem, tax_rate)
 		for name, amount in pairs(tank.get_fluid_contents()) do
 			price = storage.prices[name]
 			if price ~= nil then
-				money1 = amount * price.current
-				tax1 = money1 * tax_rate / 100
-				money = money + money1
-				taxes = taxes + tax1
-				tank.remove_fluid({ name = name, amount = amount })
+				local removed = tank.extract_fluid({ name = name, amount = amount })
+				if removed > 0 then
+					money1 = removed * price.current
+					tax1 = money1 * tax_rate / 100
+					money = money + money1
+					taxes = taxes + tax1
 
-				update_transaction(force_mem, "fluid", name, price, -amount)
-				if amount ~= 0 then
+					update_transaction(force_mem, "fluid", name, price, -removed)
 					trader.sold_name = name
 					trader.sold_quality = 1
 				end
@@ -2055,22 +2045,27 @@ local function buy_trader(trader, force_mem, tax_rate)
 					amount_box = amount_box + fluid_amount
 				else
 					-- clear other fluids if they are less than 0.1
-					tank.remove_fluid({ name = fluid_name, amount = fluid_amount })
+					tank.extract_fluid({ name = fluid_name, amount = fluid_amount })
 				end
 			end
 
 
 			if price then
-				local purchased = math.min(order.count, (trader.tank_max - amount_box))
-				money1 = purchased * price.current
-				tax1 = money1 * tax_rate / 100
-				if purchased > 0 and money1 + tax1 <= force_mem.credits then
-					money = money + money1
-					taxes = taxes + tax1
-					force_mem.credits = force_mem.credits - money1 - tax1
-					tank.insert_fluid({ name = name, amount = purchased })
+				local capacity = tank.get_fluid_capacity(1)
+				local requested = math.min(order.count, capacity - amount_box)
+				local requested_money = requested * price.current
+				local requested_tax = requested_money * tax_rate / 100
+				if requested > 0 and requested_money + requested_tax <= force_mem.credits then
+					local purchased = tank.insert_fluid({ name = name, amount = requested })
+					if purchased > 0 then
+						money1 = purchased * price.current
+						tax1 = money1 * tax_rate / 100
+						money = money + money1
+						taxes = taxes + tax1
+						force_mem.credits = force_mem.credits - money1 - tax1
 
-					update_transaction(force_mem, "fluid", name, price, purchased)
+						update_transaction(force_mem, "fluid", name, price, purchased)
+					end
 				end
 			end
 		end
@@ -2082,7 +2077,8 @@ local function buy_trader(trader, force_mem, tax_rate)
 		local price = storage.prices[name]
 
 		if order and price then
-			local purchased = math.min(order.count, trader.accu_max - count)
+			local capacity = (accu.electric_buffer_size or (trader.accu_max * 1000000)) / 1000000
+			local purchased = math.min(order.count, capacity - count)
 			money = purchased * price.current
 
 			if purchased > 0 and money <= force_mem.credits then

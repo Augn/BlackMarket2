@@ -1,4 +1,12 @@
 ---------------------------------------------------------------------------------------------------
+Version: 2.3.0
+Date: 2026-08-03
+  Changes:
+    -  Updated for Factorio 2.1 and Factorio Library 0.17.2
+    -  Migrated trading tanks to the Factorio 2.1 fluid storage API
+    -  Updated recipe pricing for the Factorio 2.1 product probability model
+    -  Accounted for quality-scaled tank and accumulator capacities
+---------------------------------------------------------------------------------------------------
 Version: 2.2.19
 Date: 2026-04-01
   Changes:
